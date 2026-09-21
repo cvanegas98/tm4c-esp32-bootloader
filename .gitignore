@@ -1,0 +1,30 @@
+# ---- Keil MDK build output ----
+Objects/
+Listings/
+*.axf
+*.bin
+*.hex
+*.map
+# uVision generates the scatter file from the Target dialog.
+# Un-ignore this if you ever hand-write one.
+*.sct
+*.dep
+*.lnp
+*.crf
+*.o
+*.d
+
+# ---- Keil user-specific state (machine/user dependent, not project config) ----
+*.uvguix.*
+*.uvoptx
+EventRecorderStub.scvd
+
+# ---- Vendor documentation ----
+# 9 MB of TI PDFs. Literature numbers and the page references we care about
+# are recorded in docs/references.md instead.
+*.pdf
+
+# ---- OS noise ----
+Thumbs.db
+Desktop.ini
+.DS_Store
