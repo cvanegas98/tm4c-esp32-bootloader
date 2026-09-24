@@ -172,3 +172,74 @@ way the covered range stays contiguous and one call covers it.
 Migration path: split into `crc32_init` / `crc32_update` / `crc32_final` (the loop already
 carries `crc` as its only state) and keep `crc32_compute` as a wrapper, so existing
 callers and the host test are unchanged.
+
+---
+
+## D6 — Flash driver, bootloader clock, and watchdog timing
+
+**Clock.** The bootloader runs from the 16 MHz crystal (MOSC) with the PLL off.
+
+- At or below 40 MHz, so MEM#14 does not apply and the program/erase routine can execute
+  from flash — no SRAM copy. Fetches simply stall until the operation completes (p. 531).
+- **Rejected — PIOSC.** Also 16 MHz with no crystal start-up, but only ±3% across
+  voltage and temperature (Table 24-15). CAN bit timing needs the two nodes within roughly
+  0.5–1.5% combined, and the bootloader must speak CAN in safe mode.
+
+**Writes: single 32-bit words via `FMD`/`FMA`/`FMC` only.** The two writes that matter
+for atomicity — committing `magic` and clearing a boot-counter bit — are single words
+anyway. A full 36 KB slot is ~9,216 words, about 0.5 s worst case at 50 µs per 64 bits
+(Table 24-27), so the 32-word write buffer (`FWBn`/`FMC2`) is not worth its 128-byte
+alignment rule and extra code.
+
+Write rules the driver and its callers must respect:
+
+- A write can only clear bits. Any 1-bit in the request over a 0 in flash fails the
+  **whole** write, changes nothing, and sets `INVDRIS` (p. 531). Clearing a boot-counter
+  bit is written as `old & ~bit`.
+- `WRKEY` is `0xA442` when `BOOTCFG.KEY` = 1 (factory default) and `0x71D5` otherwise
+  (p. 583). A wrong key is ignored silently — no operation, no error flag.
+
+**Error return: the masked `FCRIS` error bits; 0 means success.** Stale flags are cleared
+through `FCMISC` before each operation and checked after it. Callers that only need
+pass/fail test for non-zero; the fault log records the cause.
+
+| Bit | Meaning | Response |
+|---|---|---|
+| `VOLTRIS` | Pump voltage out of spec, operation aborted (brownout) | Retry, log |
+| `INVDRIS` | Tried to program a 0 back to 1 — software bug | No retry |
+| `ARIS` | Program/erase on a protected block — software bug | No retry |
+| `ERRIS` | Program/erase verify failed — possible wear | Treat target as bad |
+
+**Self-protection: uncommitted `FMPPE0` bits 0–15, set at every boot.** Each bit covers a
+2 KB block, so bits 0–15 are exactly the 32 KB bootloader region; bit 16 (`0x08000`, the
+metadata journal) stays writable.
+
+- `FMPPEn` is RW0 — bits only go 1 -> 0 — and only a power-on reset restores them; watchdog,
+  software and pin resets do not (p. 579). That is what makes it stick for the app's
+  whole run, and also why **only the bootloader region** is ever protected this way:
+  a protected slot or journal would stay unwritable after a watchdog reset.
+- Never committed (MEM#05, see constraints above).
+- Consequence: **the bootloader cannot update itself in the field.** Not a goal.
+- On the bench, if LM Flash cannot reprogram the bootloader region, power-cycle the board.
+
+**Watchdog: WDT0, 1 s from last feed to reset.**
+
+- WDT0 resets on its **second** time-out (p. 774), so `WDTLOAD` holds 0.5 s of ticks —
+  8,000,000 at 16 MHz. First time-out raises the interrupt at 0.5 s; reset at 1.0 s.
+- The WDT interrupt handler must **not** clear the interrupt — that counts as a feed and
+  would keep a hung system alive. It may write a fault-log entry, then let the second
+  time-out reset.
+- Margin: a worst-case page erase stalls the CPU for up to 500 ms (Table 24-27), which is
+  2× inside the 1 s budget. Multi-page erases feed between pages (~18 s for a full slot).
+  Safe-mode CAN reception feeds inside its RX loop.
+
+**Open items.**
+
+1. **App-side flash writes vs. MEM#14.** The app marks boot-OK in the metadata journal,
+   and it will likely run from the PLL above 40 MHz. Options: drop the clock to ≤40 MHz
+   around each write, or run the app's program/erase routine from SRAM with interrupts
+   disabled. *Undecided.*
+2. **Watchdog timeout scales with the app's clock.** WDT0 counts system-clock ticks, so
+   a load set at 16 MHz gives 0.2 s to reset at 80 MHz. Options: the app reloads
+   `WDTLOAD` after its clock switch (bootloader leaves the WDT registers unlocked), or
+   the bootloader locks the WDT and the app must stay at 16 MHz. *Undecided.*
