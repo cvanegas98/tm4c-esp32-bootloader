@@ -189,9 +189,21 @@ callers and the host test are unchanged.
 
 **Writes: single 32-bit words via `FMD`/`FMA`/`FMC` only.** The two writes that matter
 for atomicity — committing `magic` and clearing a boot-counter bit — are single words
-anyway. A full 36 KB slot is ~9,216 words, about 0.5 s worst case at 50 µs per 64 bits
-(Table 24-27), so the 32-word write buffer (`FWBn`/`FMC2`) is not worth its 128-byte
-alignment rule and extra code.
+anyway. The 32-word write buffer (`FWBn`/`FMC2`) is not worth its 128-byte alignment
+rule and extra code.
+
+Write time (Table 24-27, `TPROG64`): 30 µs min, 50 µs nominal, **300 µs max** per program
+operation. Footnote b: programming fewer than 64 bits takes the same time, so each
+single-word write costs a full cycle.
+
+| | Per word | Full 36 KB slot (~9,216 words) |
+|---|---|---|
+| Nominal | 50 µs | ≈ 0.46 s |
+| Worst case | 300 µs | **≈ 2.8 s** |
+
+A single write stalls the CPU for at most 300 µs, but a full-slot write exceeds the 1 s
+watchdog budget, so slot writes must feed the watchdog along the way (see Watchdog).
+*(Corrected 2026-09-24: an earlier draft quoted the 50 µs nominal as the worst case.)*
 
 Write rules the driver and its callers must respect:
 
@@ -200,10 +212,39 @@ Write rules the driver and its callers must respect:
   bit is written as `old & ~bit`.
 - `WRKEY` is `0xA442` when `BOOTCFG.KEY` = 1 (factory default) and `0x71D5` otherwise
   (p. 583). A wrong key is ignored silently — no operation, no error flag.
+- `FMA` must be 4-byte aligned for a word write; otherwise "the results of the operation
+  are unpredictable" (p. 542). The alignment check is required, not defensive.
+
+**API: `flash_write_word(address, value)`, one word per call.** Callers that write many
+words (image transfer) loop, so they already know which address failed, and they own
+watchdog feeding — the driver knows nothing about the watchdog.
+
+`flash_write_word` checks, in order:
+
+1. Alignment and range (`0x08000`–`0x3FFFC`) → `FLASH_ERR_INVALID_ADDRESS`.
+2. **Skip rule:** if the word already holds `value`, return 0 without programming. This
+   covers writing `0xFFFFFFFF` to an erased word, and makes retries idempotent — a
+   resumed transfer can rewrite words that already landed, and re-clearing an already
+   cleared boot-counter bit costs nothing.
+3. **0-to-1 check in software:** if `(current & value) != value`, the request has a 1
+   over a 0 in flash → `FLASH_ERR_ZERO_TO_ONE`, nothing written. This enforces the
+   `old & ~bit` rule instead of only documenting it. Writing `0xFFFFFFFF` over a
+   programmed word fails here — the caller asked for a value that needs an erase.
+4. Program, check the `FCRIS` error bits, then verify the word reads back exactly
+   `value` → `FLASH_ERR_VERIFY_FAILED` on mismatch.
+
+`INVDRIS` stays in the hardware error mask as a backstop behind check 3. Consequence:
+the hardware 0-to-1 path can no longer be exercised through the driver on the bench;
+it only matters if check 3 itself is wrong.
+
+Phase 5 note: a word interrupted mid-program by power loss can read back correctly
+while only weakly programmed, and the skip rule would leave it in place. This matters
+most for the single-word `magic` commit; it belongs in the fault-injection campaign.
 
 **Error return: 0 means success.** Hardware failures return the masked `FCRIS` error
-bits. Bits 31–30 are software errors shared by erase and future word-write operations:
-`FLASH_ERR_INVALID_ADDRESS` (bit 31) and `FLASH_ERR_VERIFY_FAILED` (bit 30).
+bits. Bits 31–29 are software errors shared by erase and word write:
+`FLASH_ERR_INVALID_ADDRESS` (bit 31), `FLASH_ERR_VERIFY_FAILED` (bit 30), and
+`FLASH_ERR_ZERO_TO_ONE` (bit 29, write only).
 Stale flags, including `PRIS`, are cleared through `FCMISC` before each operation and
 the hardware error bits are checked afterward. Callers needing only pass/fail can
 test for non-zero; the fault log records the cause.
@@ -218,7 +259,7 @@ boot-progress marker design.
 | Bit | Meaning | Response |
 |---|---|---|
 | `VOLTRIS` | Pump voltage out of spec, operation aborted (brownout) | Retry, log |
-| `INVDRIS` | Tried to program a 0 back to 1 — software bug | No retry |
+| `INVDRIS` | Tried to program a 0 back to 1 — bug in the software 0-to-1 check | No retry |
 | `ARIS` | Program/erase on a protected block — software bug | No retry |
 | `ERRIS` (bit 11) | Erase verify failed — possible wear | Treat target as bad |
 | `PROGRIS` (bit 13) | Program verify failed — possible wear | Treat target as bad |
@@ -244,7 +285,10 @@ metadata journal) stays writable.
   the device.
 - Margin: a worst-case page erase stalls the CPU for up to 500 ms (Table 24-27), which is
   2× inside the 1 s budget. Multi-page erases feed between pages (~18 s for a full slot).
-  Safe-mode CAN reception feeds inside its RX loop.
+- Slot writes feed at least once per 1 KB page written (256 words, ≤ 77 ms at the
+  300 µs worst case). A full slot takes up to ~2.8 s, so writing it without feeding
+  would reset the device.
+- Safe-mode CAN reception feeds inside its RX loop.
 
 ### D6 addendum — build configuration and bench procedure (2026-09-24)
 
