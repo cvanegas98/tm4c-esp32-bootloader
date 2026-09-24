@@ -110,3 +110,65 @@ address for `VTOR`.
 - **Erase time scales with wear** — 8–15 ms fresh, up to 500 ms at 100k cycles. The
   watchdog is serviced inline between pages, not from an ISR.
 - **WDT0 only** — WDT#01/#02/#03 all affect Watchdog Timer 1.
+
+---
+
+## D5 — CRC-32 variant, implementation, and scope
+
+**Variant.** CRC-32/ISO-HDLC — the zlib / PNG / Ethernet one.
+
+| Parameter | Value |
+|---|---|
+| Polynomial | `0x04C11DB7` (`0xEDB88320` in reflected form) |
+| Init | `0xFFFFFFFF` |
+| RefIn / RefOut | true / true |
+| XorOut | `0xFFFFFFFF` |
+
+**Check value:** CRC-32 of the ASCII bytes `123456789` (9 bytes, no terminator) is
+**`0xCBF43926`**. Both the host packager and the target implementation must produce
+this before either is trusted.
+
+**Why this variant.** Python's `zlib.crc32()` implements it exactly, so the host side is
+free and only the target implementation has to be written and verified.
+
+**Implementation: nibble table.** 16 entries, 64 bytes of RO data, two lookups per byte.
+Roughly an order of magnitude faster than bitwise for 64 bytes of flash — the 256-entry
+byte table's extra speed is not worth 1 KB out of a 32 KB bootloader for an operation
+that runs once or twice per reset.
+
+**Rejected — ROM CRC.** The TM4C123 ROM contains a CRC implementation and the datasheet
+names flash validation as an intended use (§8.2.2.4, p. 528). It costs zero flash, but
+the variant and API are documented only in the ROM User's Guide (SPMU367), which we have
+not read, and MEM#11 shows rev-7 ROM APIs are not automatically trustworthy.
+
+**Scope: the header CRC does not cover the magic field.**
+
+The image commit sequence is: write image -> write header (all fields except magic) ->
+verify -> write magic as a **single 32-bit word**, which is the act that makes the image
+valid. If the header CRC covered the magic, the magic could not be written last without
+invalidating the header. Therefore:
+
+- `magic` is the standalone validity flag, at header offset 0.
+- The header CRC covers the header from the field **after** `magic` through the end of
+  the header.
+- The image CRC covers the image payload only, not the header.
+
+**API: one-shot `crc32_compute(data, length)`, no streaming interface.** Every CRC the
+bootloader computes is over contiguous memory: the image and header CRCs are computed
+over flash, and any per-chunk check in the CAN framing is over a single RX buffer. The
+post-update image CRC is deliberately computed by reading the slot back from flash, not
+accumulated over the incoming CAN stream — a stream CRC would still match after a failed
+word program or a torn erase, while a read-back CRC verifies what was actually programmed.
+
+**Constraint on the header layout.** The header CRC must also exclude its own field, so
+`header_crc` sits either immediately after `magic` or as the last header field. Either
+way the covered range stays contiguous and one call covers it.
+
+**Revisit if:**
+- CRC over a full 36 KB slot takes longer than the watchdog budget allows (estimate
+  ~11 ms at 50 MHz, ~35 ms at 16 MHz; to be measured on target), forcing a feed mid-CRC; or
+- Phase 3 needs a CRC accumulated across chunks before they reach flash.
+
+Migration path: split into `crc32_init` / `crc32_update` / `crc32_final` (the loop already
+carries `crc` as its only state) and keep `crc32_compute` as a wrapper, so existing
+callers and the host test are unchanged.
