@@ -1,34 +1,34 @@
 // Christian Vanegas
-// Date: 2026-09-23
-// Description: Implements flash page erase for the bootloader.
+// Date: 2026-09-24
+// Description: Bench test for flash word programming.
 
 #include <stdint.h>
 
 #include "flash.h"
 #include "tm4c123gh6pm.h"
 
-#define PAGE_0   0x0001C000u
-#define PAGE_1   0x0001C400u
+#define TEST_PAGE   0x0001C000u
+#define W3_ADDRESS  0x0001C010u
+#define W4_ADDRESS  0x0001C020u
+#define W8_ADDRESS  0x0001C030u
+#define W10_ADDRESS 0x0001C034u
 
-#define PF_RED   0x02u  // PF1
-#define PF_BLUE  0x04u  // PF2
-#define PF_GREEN 0x08u  // PF3
-#define PF_LEDS  (PF_RED | PF_BLUE | PF_GREEN)
-#define PF_MAGENTA (PF_RED | PF_BLUE)
-#define PF_YELLOW  (PF_RED | PF_GREEN)
+#define PF_RED      0x02u  // PF1
+#define PF_BLUE     0x04u  // PF2
+#define PF_GREEN    0x08u  // PF3
+#define PF_LEDS     (PF_RED | PF_BLUE | PF_GREEN)
+#define PF_YELLOW   (PF_RED | PF_GREEN)
+#define PF_CYAN     (PF_BLUE | PF_GREEN)
 
-enum {
-    T1, T2, T3, T4, T5, T6,
-    TEST_COUNT
-};
+enum {W1, W2, W3, W4, W5, W6, W7, W8, W9, W10, TEST_COUNT};
 
-// Inspect these in the debugger. T5 stores the word read from PAGE_1;
-// the other entries store flash_erase_page() return values.
+// Inspect these in the debugger. W9 is a bitmask of changed neighbors.
+volatile uint32_t setup_result;
 volatile uint32_t test_results[TEST_COUNT];
+volatile uint32_t w4_results[3];
 volatile uint32_t failed_tests;
-volatile uint32_t precondition_ok;
 
-static uint32_t flash_first_word(uint32_t address) {
+static uint32_t flash_word(uint32_t address) {
     return *(const volatile uint32_t *)(uintptr_t)address;
 }
 
@@ -57,51 +57,103 @@ void HardFault_Handler(void) {
 int main(void) {
     setup_leds();
 
-    uint32_t pattern_0 = flash_first_word(PAGE_0);
-    uint32_t pattern_1 = flash_first_word(PAGE_1);
-
-    if (pattern_0 == 0xFFFFFFFFu || pattern_1 == 0xFFFFFFFFu) {
-        set_leds(PF_MAGENTA);
+    // A previous run's runtime protection needs a power-on reset.
+    // Check this before erasing anything.
+    if ((FLASH_FMPPE1_R & (1u << 24)) == 0u) {
+        set_leds(PF_CYAN);
         for (;;) {}
     }
-    precondition_ok = 1u;
 
-    test_results[T1] = flash_erase_page(PAGE_0 + 4u);
-    if (test_results[T1] != FLASH_ERR_INVALID_ADDRESS ||
-        flash_first_word(PAGE_0) != pattern_0) {
-        failed_tests |= 1u << T1;
+    setup_result = flash_erase_page(TEST_PAGE);
+    if (setup_result != 0u) {
+        set_leds(PF_RED);
+        for (;;) {}
     }
 
-    test_results[T2] = flash_erase_page(0x00007C00u);
-    if (test_results[T2] != FLASH_ERR_INVALID_ADDRESS) {
-        failed_tests |= 1u << T2;
+    test_results[W1] = flash_write_word(0x0001C002u, 0x12345678u);
+    if (test_results[W1] != FLASH_ERR_INVALID_ADDRESS) {
+        failed_tests |= 1u << W1;
     }
 
-    test_results[T3] = flash_erase_page(0x00040000u);
-    if (test_results[T3] != FLASH_ERR_INVALID_ADDRESS) {
-        failed_tests |= 1u << T3;
+    test_results[W2] = flash_write_word(0x00007FFCu, 0x12345678u);
+    if (test_results[W2] != FLASH_ERR_INVALID_ADDRESS) {
+        failed_tests |= 1u << W2;
     }
 
-    set_leds(PF_BLUE);
-    test_results[T4] = flash_erase_page(PAGE_0);
-    set_leds(0u);
-    if (test_results[T4] != 0u) {
-        failed_tests |= 1u << T4;
+    test_results[W3] = flash_write_word(W3_ADDRESS, 0x12345678u);
+    if (test_results[W3] != 0u ||
+        flash_word(W3_ADDRESS) != 0x12345678u) {
+        failed_tests |= 1u << W3;
     }
 
-    test_results[T5] = flash_first_word(PAGE_1);
-    if (test_results[T5] != pattern_1) {
-        failed_tests |= 1u << T5;
+    w4_results[0] = flash_write_word(W4_ADDRESS, 0xFFFFFFFEu);
+    if (w4_results[0] != 0u ||
+        flash_word(W4_ADDRESS) != 0xFFFFFFFEu) {
+        failed_tests |= 1u << W4;
     }
 
-    // PAGE_0 and PAGE_1 share protection block 24 in FMPPE1.
-    // This changes runtime protection only. Do not issue FMC.COMT.
+    w4_results[1] = flash_write_word(W4_ADDRESS, 0xFFFFFFFCu);
+    if (w4_results[1] != 0u ||
+        flash_word(W4_ADDRESS) != 0xFFFFFFFCu) {
+        failed_tests |= 1u << W4;
+    }
+
+    w4_results[2] = flash_write_word(W4_ADDRESS, 0xFFFFFFF8u);
+    if (w4_results[2] != 0u ||
+        flash_word(W4_ADDRESS) != 0xFFFFFFF8u) {
+        failed_tests |= 1u << W4;
+    }
+    test_results[W4] =
+        w4_results[0] | w4_results[1] | w4_results[2];
+
+    test_results[W5] = flash_write_word(W3_ADDRESS, 0x12345678u);
+    if (test_results[W5] != 0u ||
+        flash_word(W3_ADDRESS) != 0x12345678u) {
+        failed_tests |= 1u << W5;
+    }
+
+    test_results[W6] = flash_write_word(W3_ADDRESS, 0x0000FFFFu);
+    if (test_results[W6] != FLASH_ERR_ZERO_TO_ONE ||
+        flash_word(W3_ADDRESS) != 0x12345678u) {
+        failed_tests |= 1u << W6;
+    }
+
+    test_results[W7] = flash_write_word(W3_ADDRESS, 0xFFFFFFFFu);
+    if (test_results[W7] != FLASH_ERR_ZERO_TO_ONE ||
+        flash_word(W3_ADDRESS) != 0x12345678u) {
+        failed_tests |= 1u << W7;
+    }
+
+    test_results[W8] = flash_write_word(W8_ADDRESS, 0xFFFFFFFFu);
+    if (test_results[W8] != 0u ||
+        flash_word(W8_ADDRESS) != 0xFFFFFFFFu) {
+        failed_tests |= 1u << W8;
+    }
+
+    // Check the words immediately before and after W3 and W4.
+    if (flash_word(W3_ADDRESS - 4u) != 0xFFFFFFFFu) {
+        test_results[W9] |= 1u << 0;
+    }
+    if (flash_word(W3_ADDRESS + 4u) != 0xFFFFFFFFu) {
+        test_results[W9] |= 1u << 1;
+    }
+    if (flash_word(W4_ADDRESS - 4u) != 0xFFFFFFFFu) {
+        test_results[W9] |= 1u << 2;
+    }
+    if (flash_word(W4_ADDRESS + 4u) != 0xFFFFFFFFu) {
+        test_results[W9] |= 1u << 3;
+    }
+    if (test_results[W9] != 0u) {
+        failed_tests |= 1u << W9;
+    }
+
+    // Last: protect the 2 KB block containing the test page.
+    // This changes runtime protection only; never write FMC.COMT.
     FLASH_FMPPE1_R &= ~(1u << 24);
 
-    test_results[T6] = flash_erase_page(PAGE_1);
-    if (test_results[T6] != FLASH_FCRIS_ARIS ||
-        flash_first_word(PAGE_1) != pattern_1) {
-        failed_tests |= 1u << T6;
+    test_results[W10] = flash_write_word(W10_ADDRESS, 0x12345678u);
+    if (test_results[W10] != FLASH_FCRIS_ARIS || flash_word(W10_ADDRESS) != 0xFFFFFFFFu) {
+        failed_tests |= 1u << W10;
     }
 
     set_leds(failed_tests == 0u ? PF_GREEN : PF_RED);
