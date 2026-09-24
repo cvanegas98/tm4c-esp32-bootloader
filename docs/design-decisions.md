@@ -181,6 +181,8 @@ callers and the host test are unchanged.
 
 - At or below 40 MHz, so MEM#14 does not apply and the program/erase routine can execute
   from flash — no SRAM copy. Fetches simply stall until the operation completes (p. 531).
+- The flash driver assumes this clock limit. Code running above 40 MHz must lower the
+  clock before calling it or use a separate routine that executes from SRAM.
 - **Rejected — PIOSC.** Also 16 MHz with no crystal start-up, but only ±3% across
   voltage and temperature (Table 24-15). CAN bit timing needs the two nodes within roughly
   0.5–1.5% combined, and the bootloader must speak CAN in safe mode.
@@ -199,16 +201,27 @@ Write rules the driver and its callers must respect:
 - `WRKEY` is `0xA442` when `BOOTCFG.KEY` = 1 (factory default) and `0x71D5` otherwise
   (p. 583). A wrong key is ignored silently — no operation, no error flag.
 
-**Error return: the masked `FCRIS` error bits; 0 means success.** Stale flags are cleared
-through `FCMISC` before each operation and checked after it. Callers that only need
-pass/fail test for non-zero; the fault log records the cause.
+**Error return: 0 means success.** Hardware failures return the masked `FCRIS` error
+bits. Bits 31–30 are software errors shared by erase and future word-write operations:
+`FLASH_ERR_INVALID_ADDRESS` (bit 31) and `FLASH_ERR_VERIFY_FAILED` (bit 30).
+Stale flags, including `PRIS`, are cleared through `FCMISC` before each operation and
+the hardware error bits are checked afterward. Callers needing only pass/fail can
+test for non-zero; the fault log records the cause.
+
+**Flash-controller ownership.** No interrupt handler may start a flash operation or
+change `FMA`, `FMD`, or `FMC`. Foreground flash operations therefore keep control of
+the address and command registers from setup through completion. The watchdog ISR
+must not write the flash fault log. No watchdog-interrupt diagnostic record is
+specified yet; any future record that must survive reset belongs with the software
+boot-progress marker design.
 
 | Bit | Meaning | Response |
 |---|---|---|
 | `VOLTRIS` | Pump voltage out of spec, operation aborted (brownout) | Retry, log |
 | `INVDRIS` | Tried to program a 0 back to 1 — software bug | No retry |
 | `ARIS` | Program/erase on a protected block — software bug | No retry |
-| `ERRIS` | Program/erase verify failed — possible wear | Treat target as bad |
+| `ERRIS` (bit 11) | Erase verify failed — possible wear | Treat target as bad |
+| `PROGRIS` (bit 13) | Program verify failed — possible wear | Treat target as bad |
 
 **Self-protection: uncommitted `FMPPE0` bits 0–15, set at every boot.** Each bit covers a
 2 KB block, so bits 0–15 are exactly the 32 KB bootloader region; bit 16 (`0x08000`, the
@@ -227,11 +240,57 @@ metadata journal) stays writable.
 - WDT0 resets on its **second** time-out (p. 774), so `WDTLOAD` holds 0.5 s of ticks —
   8,000,000 at 16 MHz. First time-out raises the interrupt at 0.5 s; reset at 1.0 s.
 - The WDT interrupt handler must **not** clear the interrupt — that counts as a feed and
-  would keep a hung system alive. It may write a fault-log entry, then let the second
-  time-out reset.
+  would keep a hung system alive. It must not write flash; the second time-out resets
+  the device.
 - Margin: a worst-case page erase stalls the CPU for up to 500 ms (Table 24-27), which is
   2× inside the 1 s budget. Multi-page erases feed between pages (~18 s for a full slot).
   Safe-mode CAN reception feeds inside its RX loop.
+
+### D6 addendum — build configuration and bench procedure (2026-09-24)
+
+Found while bench-testing `flash_erase_page`.
+
+**Floating Point Hardware must be "Not Used" for the bootloader.**
+
+- `vendor/startup.s` leaves the FPU disabled: the `CPACR` write in `Reset_Handler` is
+  commented out. TI's original file enables it there.
+- With *Floating Point Hardware: Single Precision*, armclang builds hard-float
+  (`-mfloat-abi=hard -mfpu=fpv4-sp-d16`), and the C library's `__rt_lib_init` calls
+  `_fp_init`, which executes `VMRS` **before `main`**. With CP10/CP11 disabled that is a
+  no-coprocessor UsageFault, escalated to HardFault. Observed: fault LED on power-up,
+  `main` never reached.
+- With *Not Used* (`-mfloat-abi=soft -mfpu=none`, linker `--fpu=SoftVFP`), the image
+  contains no floating-point instructions and boots normally.
+- Handoff consequence: the bootloader never enables the FPU, so the app's own startup
+  owns `CPACR`. A hard-float app must enable the FPU in its `Reset_Handler` before
+  `__main`.
+- The project setting once reverted to Single Precision without notice. Before flashing,
+  confirm the build used `-mfloat-abi=soft` (in `Objects/*.dep`) or that the disassembly
+  has no `V*` instructions.
+
+**Faults must be visible.** The vendor `HardFault_Handler` is `B .`, which makes a fault
+look like "nothing happened" — that is what hid the FPU fault for a day. Bench test
+programs define their own `HardFault_Handler` that lights a distinct LED color. The
+Phase 2 bootloader fault handler must be visible or recorded, then reset.
+
+**Bench procedure: LM Flash restarts the CPU when it disconnects.**
+
+- Observed: during a program or upload the CPU is reset and held (LEDs go dark as GPIO
+  returns to reset state). When the operation finishes, the CPU is released and the
+  image runs from reset — **without a power-on reset**.
+- So a test image that modifies flash runs after *every* LM Flash command. A
+  before/after upload only describes what ran since the previous command. Record the
+  LED state after each command.
+- This is not a power-on reset: uncommitted `FMPPEn` bits survive it. A run started
+  this way after a run that cleared a protection bit will see `ARIS` on that block.
+- Once, right after programming a device whose flash had been blank, the first run hit
+  HardFault; the next power-on boot was normal. Only boots from a power-cycle are
+  treated as representative.
+
+**Not yet measured: page-erase time on this part.** No scope on hand, and Keil's logic
+analyzer needs SWO trace, which the on-board ICDI does not provide. The watchdog margin
+above uses the datasheet worst case (500 ms), so the measurement confirms rather than
+decides anything.
 
 **Open items.**
 
