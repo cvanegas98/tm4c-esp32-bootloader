@@ -317,14 +317,25 @@ look like "nothing happened" — that is what hid the FPU fault for a day. Bench
 programs define their own `HardFault_Handler` that lights a distinct LED color. The
 Phase 2 bootloader fault handler must be visible or recorded, then reset.
 
-**Bench procedure: LM Flash restarts the CPU when it disconnects.**
+**Bench procedure: LM Flash can restart the CPU without a power-on reset.**
 
-- Observed: during a program or upload the CPU is reset and held (LEDs go dark as GPIO
-  returns to reset state). When the operation finishes, the CPU is released and the
-  image runs from reset — **without a power-on reset**.
-- So a test image that modifies flash runs after *every* LM Flash command. A
-  before/after upload only describes what ran since the previous command. Record the
-  LED state after each command.
+- During a program or upload the CPU is reset and held (LEDs go dark as GPIO returns to
+  reset state). What happens when the command finishes differs by command:
+
+  | After | Observed | Count |
+  |---|---|---|
+  | Upload (`-u`) | CPU released; image runs from reset | 3 of 3 |
+  | Program (`-v file`) | CPU stays held; LEDs dark until the next command or power-cycle | 2 of 3 |
+  | Program onto a previously blank device | Image ran and hit HardFault (below) | 1 of 3 |
+
+- Do not rely on either behavior. A test image that modifies flash may run after any LM
+  Flash command, and a before/after upload only describes what ran since the previous
+  command. Record the LED state after each command.
+- Test images should be self-contained: set up their own starting state, and detect a
+  start that was not a power-on reset (the write test checks `FMPPE1` bit 24 and
+  stops with a distinct color if it is already cleared).
+- *(Corrected 2026-09-24: the first version of this addendum said the CPU is released
+  after every command; the write-test run showed programs leave it held.)*
 - This is not a power-on reset: uncommitted `FMPPEn` bits survive it. A run started
   this way after a run that cleared a protection bit will see `ARIS` on that block.
 - Once, right after programming a device whose flash had been blank, the first run hit
