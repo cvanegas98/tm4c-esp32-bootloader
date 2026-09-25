@@ -357,3 +357,76 @@ decides anything.
    a load set at 16 MHz gives 0.2 s to reset at 80 MHz. Options: the app reloads
    `WDTLOAD` after its clock switch (bootloader leaves the WDT registers unlocked), or
    the bootloader locks the WDT and the app must stay at 16 MHz. *Undecided.*
+
+---
+
+## D7 — Image header format
+
+**Decision.** A fixed 32-byte header at the start of each slot's header page (`0x0A000`
+for slot A, `0x13000` for slot B). All fields are 32-bit words, little-endian. The rest
+of the header page stays erased (`0xFF`).
+
+| Offset | Field | Contents |
+|---|---|---|
+| 0 | `magic` | `0xB007C0DE`. Written **last, by the bootloader**, as the validity commit |
+| 4 | `header_crc` | CRC-32 (D5) of header bytes 8 to `header_size` − 1 |
+| 8 | `header_version` | `1` |
+| 12 | `header_size` | `32` |
+| 16 | `load_address` | `0x0A400` (slot A) or `0x13400` (slot B) — D1 |
+| 20 | `image_size` | Bytes; a multiple of 4; 1 to `0x8C00` |
+| 24 | `image_crc` | CRC-32 (D5) of `image_size` bytes from `load_address` |
+| 28 | `fw_version` | Semantic version packed as `major << 16 \| minor << 8 \| patch` |
+
+**Why `header_crc` at offset 4.** D5 requires the CRC to skip `magic` and its own field,
+which leaves two contiguous choices: directly after `magic`, or last. At offset 4 its
+position never moves when a later header version grows at the end, and the bootloader
+can locate it before knowing which version it is reading.
+
+**Why all 32-bit words.** Flash is programmed one word at a time (D6), fields never
+straddle a write, and the host packs the header with a single `struct` format.
+
+**Why semver packed into one word.** Human-readable in logs, and still compares
+correctly as a plain unsigned number: major 0–65535, minor and patch 0–255.
+
+**Padding.** The packager pads the image to a multiple of 4 bytes with `0xFF`. A padded
+word of `0xFFFFFFFF` hits the skip rule in `flash_write_word` (D6), so padding costs no
+program cycles. `image_size` and `image_crc` include the padding.
+
+**Who writes `magic`.** The host packager fills in every field, including `magic`, so
+the file is self-describing. On the target, the bootloader writes every header word
+except `magic`, verifies both CRCs by reading them back from flash, and only then writes
+`magic` itself. Whatever `magic` value the host sent is ignored.
+
+**Entry point comes from the image's vector table, not the header.** Word 0 of the image
+is the initial stack pointer, word 1 the reset handler. Storing them in the header too
+would add a copy that can disagree. The bootloader sanity-checks them instead:
+
+- Initial SP inside SRAM: `0x20000000` < SP ≤ `0x20008000`, 8-byte aligned.
+- Reset handler has bit 0 set (Thumb), and `(reset & ~1)` lies inside
+  `[load_address, load_address + image_size)`.
+
+**Validation order at boot** (cheapest first; any failure means the slot is not
+bootable):
+
+1. `magic` == `0xB007C0DE`.
+2. `header_size` within bounds, then `header_crc` over bytes 8 to `header_size` − 1.
+3. `header_version` accepted; `load_address` equals this slot's image base; `image_size`
+   non-zero, a multiple of 4, and ≤ `0x8C00`.
+4. `image_crc` over the image.
+5. Vector-table sanity checks above.
+
+**Good/bad status lives only in the metadata journal (D3).** `magic` means exactly one
+thing: the image and header were completely written and verified. Whether the image has
+booted successfully, is pending its first boot, or has been marked bad is recorded only
+in the journal. Rejected: clearing `magic` to `0x00000000` to mark an image bad — it
+works without an erase, but gives two places that can disagree.
+
+**Open item.**
+
+1. **Future header versions vs. a bootloader that cannot be updated (D6).** A header
+   version 2 with more fields will be read by today's bootloader. Options: accept only
+   `header_version` 1 and `header_size` 32 (strict — any format change needs a new
+   bootloader, which the field can never get), or accept any `header_size` from 32 to
+   1024 that is a multiple of 4, verify the CRC over all of it, and read only the
+   version 1 fields (forward-compatible, as long as version 2 only appends).
+   *Undecided.*
