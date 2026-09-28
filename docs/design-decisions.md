@@ -373,12 +373,53 @@ if its append fails because the current page is full, it just retries on the nex
 boot. This is only safe because the bootloader guarantees room before every jump; see
 D8's headroom check.
 
-**Open item.**
+**Watchdog budget across the app's clock: calibrate for the chip's max clock
+(2026-09-28).**
 
-1. **Watchdog timeout scales with the app's clock.** WDT0 counts system-clock ticks, so
-   a load set at 16 MHz gives 0.2 s to reset at 80 MHz. Options: the app reloads
-   `WDTLOAD` after its clock switch (bootloader leaves the WDT registers unlocked), or
-   the bootloader locks the WDT and the app must stay at 16 MHz. *Undecided.*
+**Decision.** As one of the last steps before jumping (alongside the D9 marker
+write), the bootloader reprograms `WDTLOAD` for the TM4C123's maximum system clock —
+80 MHz — instead of the 16 MHz it used for its own execution, then locks the
+watchdog via `WDTLOCK`. The app never touches WDT registers and may run at any clock
+up to 80 MHz.
+
+| | Bootloader (own execution) | App (post-jump) |
+|---|---|---|
+| Clock assumed | 16 MHz (MOSC, PLL off, above) | 80 MHz (chip maximum) |
+| `WDTLOAD` | `0x007A1200` (8,000,000) | `0x02625A00` (40,000,000) |
+| Interrupt / reset | 0.5 s / 1.0 s | 0.5 s / 1.0 s **at 80 MHz** |
+
+**Why calibrating for the maximum clock is always safe, not just at 80 MHz.**
+`WDTLOAD` ticks take longer in real time at a slower clock, never shorter. A value
+sized for the fastest clock the app could ever run at is automatically safe — looser,
+not tighter — at any slower clock the app actually chooses. At 16 MHz the same
+`0x02625A00` gives roughly 2.5 s / 5.0 s instead of 0.5 s / 1.0 s: hangs are caught
+more slowly, but the watchdog can never fire early. 80 MHz is this part's hard system
+clock ceiling, so "the app must not exceed 80 MHz" is not a new restriction — it is
+the silicon's own limit.
+
+**Why lock the WDT instead of leaving it open for the app to manage.** A locked WDT
+cannot be disabled or stretched by a bug anywhere in the app — the one property a
+watchdog exists to guarantee. Locking is a one-word write (`WDTLOCK`) done once,
+right before jump, alongside the `WDTLOAD` recalibration.
+
+**Rejected — app reloads `WDTLOAD` itself after its own clock switch.** Gets an
+exactly-tight budget matched to whatever clock the app actually picks, but costs two
+things this project doesn't need to accept: a window between "clock changed" and
+"`WDTLOAD` reloaded" where the timeout is silently wrong, and WDT registers that must
+stay unlocked for the app's entire runtime — exactly the surface a stray pointer
+write could use to disable the one thing meant to catch it.
+
+**Rejected — lock the WDT and require the app to stay at 16 MHz.** Same
+tamper-resistance as the decision above, but caps the app's clock forever for no
+reason connected to the watchdog itself — MEM#14 and CAN bit-timing accuracy are the
+only real clock constraints this project has, and both are already handled elsewhere
+(the app-side RAM-resident write routine above; CAN clock accuracy is a Phase 3
+decision).
+
+**Note for implementation.** Writing `WDTLOAD` is expected to reload the running
+down-counter immediately, which would make this recalibration double as the final
+feed before jump with no separate feed call needed — confirm this against the
+datasheet's WDT register description before relying on it.
 
 ---
 
