@@ -581,6 +581,10 @@ decides which page is authoritative.
    its erase. This is the normal case, not an invariant: a power cut between step 4
    and this erase leaves a stale non-current page. That is harmless — its `page_gen`
    is lower, so it is never selected — and step 2 of the next compaction cleans it up.
+   For the same reason, a failed erase here does not fail the compaction: the
+   handoff already happened. `journal_compact` returns `JOURNAL_ERR_CLEANUP` OR'd
+   with the erase's error bits, so the caller knows the journal is usable and the
+   Phase 5 fault log still gets the cause (e.g. `ERRIS`, possible wear).
 
 **Watchdog.** Steps 2 and 5 can each erase a page (up to 500 ms, D6), about 1 s
 together — the whole watchdog budget. D6 requires a feed between multi-page erases;
@@ -608,6 +612,16 @@ no bound, and a healthy image could exhaust its 3 boot attempts purely because t
 journal was full, not because anything was wrong with it. Room for exactly 1 record
 is the simplest rule that still bounds the app's retry to at most one extra boot.
 Revisit if a boot is ever found needing more than one append in a single session.
+
+**"Room" means a blank slot, not just space.** The scan stops at a torn record as
+well as a blank one, so the append point can be a slot that is already partly
+written. Appending there fails with `FLASH_ERR_ZERO_TO_ONE` on every attempt. If
+the headroom check only measured space, it would report room, never compact, and
+the app's `STATUS = GOOD` append would fail every boot until a healthy image used up
+its 3 attempts — the exact failure this check exists to prevent. So the check also
+requires all 6 words at the append point to read `0xFFFFFFFF`; a torn slot counts as
+"no room," and compaction copies the winners to a fresh page, leaving the torn
+record behind.
 
 **Normal-boot scan (no compaction).** Find the current page via `page_gen`, then walk
 its records front-to-back, latching the highest-`seq` CRC-valid record per type. Stop
