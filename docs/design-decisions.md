@@ -514,6 +514,15 @@ little-endian.
 
 24 bytes/record, ~42 records per 1 KB page (D3) before a compaction swap.
 
+**Appending a record: `record_crc` last, always.** Offsets 0–12 (`seq`/`type`/
+`value`/`image_crc`) can be written in any order — none of them alone commits the
+record. `boot_counter` (offset 20) is also written before the commit when it needs a
+non-default value (a compaction copy carries forward an already-partially-cleared
+counter); a fresh record needs no explicit write there, since its correct starting
+value, `0xFFFFFFFF`, is already what an erased page reads as, and the D6 skip rule
+turns an explicit write of that value into a free no-op anyway. `record_crc` at
+offset 16 is written **last** — the same single-word commit pattern as `magic` in D7.
+
 **Why one shared layout instead of three record shapes.** Keeps the scanner and the
 compaction routine a single code path instead of three parsers. Costs a few unused
 bytes in the `ACTIVE_SLOT` record.
@@ -590,8 +599,11 @@ Revisit if a boot is ever found needing more than one append in a single session
 
 **Normal-boot scan (no compaction).** Find the current page via `page_gen`, then walk
 its records front-to-back, latching the highest-`seq` CRC-valid record per type. Stop
-at the first blank (`0xFFFFFFFF`) slot — appends are strictly sequential within a
-page, so nothing after the first blank slot can be valid.
+at the first record whose `record_crc` fails to verify against bytes 0–15 — not
+literally the first all-`0xFF` slot. Because `record_crc` is always the last word
+written, a torn append leaves some words written and `record_crc` still
+`0xFFFFFFFF`, which fails to verify against the partial content the same way a
+genuinely blank slot does; one check catches both.
 
 **Parked — first-boot / manufacturing provisioning.** A blank chip has both pages at
 `page_gen = 0xFFFFFFFF`; nothing exists yet for the normal scan to find. Something
