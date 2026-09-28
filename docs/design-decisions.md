@@ -347,13 +347,35 @@ analyzer needs SWO trace, which the on-board ICDI does not provide. The watchdog
 above uses the datasheet worst case (500 ms), so the measurement confirms rather than
 decides anything.
 
-**Open items.**
+**App-side flash writes: a RAM-resident write routine (2026-09-28).**
 
-1. **App-side flash writes vs. MEM#14.** The app marks boot-OK in the metadata journal,
-   and it will likely run from the PLL above 40 MHz. Options: drop the clock to ≤40 MHz
-   around each write, or run the app's program/erase routine from SRAM with interrupts
-   disabled. *Undecided.*
-2. **Watchdog timeout scales with the app's clock.** WDT0 counts system-clock ticks, so
+**Decision.** The app's boot-confirm write — and any future app-side flash write —
+runs from a small routine copied into SRAM at app startup and executed with
+interrupts disabled, not by dropping the app's clock to ≤40 MHz around each write.
+
+**Why.** This is the errata's own workaround for MEM#14: fetching from SRAM instead
+of the flash array being written removes the mis-fetch risk at its source, rather
+than working around it by staying under a clock ceiling. It is also reusable — one
+routine covers boot-confirm and any later app-side write (the Phase 5 fault log, at
+minimum) instead of special-casing this one event.
+
+**Rejected — drop the app's clock to ≤40 MHz around each write.** Would let the app
+reuse a normal flash-write routine executing from flash, but the app's clock would
+need to change and restore around every write, not just once. Once CAN is in the
+picture (Phase 3/4), a clock change mid-runtime desyncs CAN bit timing (which derives
+from system clock) right around the transition — a risk this project does not need to
+accept for a routine that can just as well run from SRAM instead. It would also
+compound with the watchdog open item below, which would then have to stay correct
+around every write instead of only around the app's own clock switch at startup.
+
+**Consequence: compaction stays bootloader-only.** The app's write never compacts —
+if its append fails because the current page is full, it just retries on the next
+boot. This is only safe because the bootloader guarantees room before every jump; see
+D8's headroom check.
+
+**Open item.**
+
+1. **Watchdog timeout scales with the app's clock.** WDT0 counts system-clock ticks, so
    a load set at 16 MHz gives 0.2 s to reset at 80 MHz. Options: the app reloads
    `WDTLOAD` after its clock switch (bootloader leaves the WDT registers unlocked), or
    the bootloader locks the WDT and the app must stay at 16 MHz. *Undecided.*
@@ -510,6 +532,20 @@ decides which page is authoritative.
 needed as a compaction target. Saves the erase from the compaction's critical path,
 but a crash-recovery scan can no longer assume the standby page is blank, which adds
 a state the recovery logic has to distinguish for no benefit this project needs.
+
+**Proactive headroom check: the bootloader guarantees room before every jump.**
+Compaction is bootloader-only (D6) — the app's own flash writes never compact, they
+just retry on the next boot if an append fails. Before jumping to the app on every
+boot, the bootloader checks whether the current page has room for at least one more
+record — bare minimum, exactly 1 — and compacts first if not. This check runs
+**before** this boot's `boot_counter` bit-clear above, so if compaction was needed,
+the bit-clear and the rest of this boot land on the fresh page.
+
+**Why bare minimum, not headroom.** Without this check, the app's retry-next-boot has
+no bound, and a healthy image could exhaust its 3 boot attempts purely because the
+journal was full, not because anything was wrong with it. Room for exactly 1 record
+is the simplest rule that still bounds the app's retry to at most one extra boot.
+Revisit if a boot is ever found needing more than one append in a single session.
 
 **Normal-boot scan (no compaction).** Find the current page via `page_gen`, then walk
 its records front-to-back, latching the highest-`seq` CRC-valid record per type. Stop
