@@ -6,6 +6,39 @@
 #include "crc32.h"
 #include "flash.h"
 
+static bool page_is_erased(uint32_t base) {
+    const volatile uint32_t *words = (const volatile uint32_t *)(uintptr_t)base;
+
+    for (size_t i = 0; i < JOURNAL_PAGE_SIZE / sizeof(uint32_t); i++) {
+        if (words[i] != UINT32_MAX) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool page_has_room(uint32_t base, const void *next_free) {
+    if (next_free == NULL) {
+        return false;
+    }
+
+    uintptr_t offset = (uintptr_t)next_free - (uintptr_t)base;
+    if (offset < sizeof(uint32_t) ||
+        offset > JOURNAL_PAGE_SIZE ||
+        JOURNAL_PAGE_SIZE - offset < sizeof(journal_record_t)) {
+        return false;
+    }
+
+    // A scan also stops at a torn record. Its slot must be blank before reuse.
+    const volatile uint32_t *words = (const volatile uint32_t *)next_free;
+    for (size_t i = 0; i < sizeof(journal_record_t) / sizeof(uint32_t); i++) {
+        if (words[i] != UINT32_MAX) {
+            return false;
+        }
+    }
+    return true;
+}
+
 uint32_t journal_record_crc(const journal_record_t *record) {
     return crc32_compute(record, 16);
 }
@@ -164,10 +197,9 @@ uint32_t journal_append(uint32_t type, uint32_t value, uint32_t image_crc) {
         return JOURNAL_ERR_NO_PAGE;
     }
 
-    uintptr_t page_base = selected == JOURNAL_PAGE_SELECT_0 ? JOURNAL_PAGE_0_BASE : JOURNAL_PAGE_1_BASE;
-    uintptr_t offset = (uintptr_t)next_free - page_base;
+    uint32_t page_base = selected == JOURNAL_PAGE_SELECT_0 ? JOURNAL_PAGE_0_BASE : JOURNAL_PAGE_1_BASE;
 
-    if (next_free == NULL || offset > JOURNAL_PAGE_SIZE || JOURNAL_PAGE_SIZE - offset < sizeof(journal_record_t)) {
+    if (!page_has_room(page_base, next_free)) {
         return JOURNAL_ERR_NO_ROOM;
     }
 
@@ -191,4 +223,88 @@ uint32_t journal_append(uint32_t type, uint32_t value, uint32_t image_crc) {
     };
 
     return journal_write_record((uint32_t)(uintptr_t)next_free, &record);
+}
+
+uint32_t journal_compact(void) {
+    const journal_record_t *active;
+    const journal_record_t *status_a;
+    const journal_record_t *status_b;
+    const void *next_free;
+
+    journal_page_select_t selected = journal_read(&active, &status_a, &status_b, &next_free);
+
+    if (selected == JOURNAL_PAGE_SELECT_NONE || selected == JOURNAL_PAGE_SELECT_AMBIGUOUS) {
+        return JOURNAL_ERR_NO_PAGE;
+    }
+
+    uint32_t current = selected == JOURNAL_PAGE_SELECT_0 ? JOURNAL_PAGE_0_BASE : JOURNAL_PAGE_1_BASE;
+    uint32_t target = selected == JOURNAL_PAGE_SELECT_0 ? JOURNAL_PAGE_1_BASE : JOURNAL_PAGE_0_BASE;
+    uint32_t current_gen = journal_page_gen((const void *)(uintptr_t)current);
+
+    // Incrementing this value would produce the erased-page sentinel.
+    if (current_gen == JOURNAL_PAGE_GEN_ERASED - 1u) {
+        return JOURNAL_ERR_NO_PAGE;
+    }
+
+    if (!page_is_erased(target)) {
+        uint32_t result = flash_erase_page(target);
+        if (result != 0u) {
+            return result;
+        }
+    }
+
+    // TODO (Phase 2): Feed the watchdog here. D6 requires a feed between
+    // multi-page erases; the old page is erased after the copy and handoff.
+
+    const journal_record_t *winners[3] = {
+        active, status_a, status_b
+    };
+    uint32_t copied = 0u;
+
+    for (size_t i = 0; i < 3; i++) {
+        if (winners[i] == NULL) {
+            continue;
+        }
+
+        uint32_t address = target + sizeof(uint32_t) + copied * sizeof(journal_record_t);
+        uint32_t result = journal_write_record(address, winners[i]);
+        if (result != 0u) {
+            return result;
+        }
+        copied++;
+    }
+
+    // Last write that makes the target page authoritative.
+    uint32_t result = flash_write_word(target, current_gen + 1u);
+    if (result != 0u) {
+        return result;
+    }
+
+    // Winner pointers referred to the old page; all reads are finished.
+    result = flash_erase_page(current);
+    if (result != 0u) {
+        return JOURNAL_ERR_CLEANUP | result;
+    }
+    return 0u;
+}
+
+uint32_t journal_ensure_room(void) {
+    const journal_record_t *active;
+    const journal_record_t *status_a;
+    const journal_record_t *status_b;
+    const void *next_free;
+
+    journal_page_select_t selected = journal_read(&active, &status_a, &status_b, &next_free);
+
+    if (selected == JOURNAL_PAGE_SELECT_NONE || selected == JOURNAL_PAGE_SELECT_AMBIGUOUS) {
+        return JOURNAL_ERR_NO_PAGE;
+    }
+
+    uint32_t current = selected == JOURNAL_PAGE_SELECT_0 ? JOURNAL_PAGE_0_BASE : JOURNAL_PAGE_1_BASE;
+
+    if (page_has_room(current, next_free)) {
+        return 0u;
+    }
+
+    return journal_compact();
 }

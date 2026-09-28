@@ -28,6 +28,7 @@
 
 #define JOURNAL_ERR_NO_ROOM 0x10000000u
 #define JOURNAL_ERR_NO_PAGE 0x08000000u
+#define JOURNAL_ERR_CLEANUP (1u << 26)
 
 typedef struct {
     uint32_t seq;
@@ -67,5 +68,8 @@ journal_page_select_t journal_read(const journal_record_t **active_slot,
 
 uint32_t journal_write_record(uint32_t address, const journal_record_t *record);
 uint32_t journal_append(uint32_t type, uint32_t value, uint32_t image_crc);
+
+uint32_t journal_compact(void);
+uint32_t journal_ensure_room(void);
 
 #endif // JOURNAL_H

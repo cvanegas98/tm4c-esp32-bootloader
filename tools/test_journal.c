@@ -13,6 +13,11 @@ uint32_t flash_write_word(uint32_t address, uint32_t value) {
     return FLASH_ERR_INVALID_ADDRESS;
 }
 
+uint32_t flash_erase_page(uint32_t address) {
+    (void)address;
+    return FLASH_ERR_INVALID_ADDRESS;
+}
+
 int main(void) {
     journal_record_t record = {
         .seq = 0x01020304,
