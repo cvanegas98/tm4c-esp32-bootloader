@@ -409,8 +409,9 @@ would add a copy that can disagree. The bootloader sanity-checks them instead:
 bootable):
 
 1. `magic` == `0xB007C0DE`.
-2. `header_size` within bounds, then `header_crc` over bytes 8 to `header_size` − 1.
-3. `header_version` accepted; `load_address` equals this slot's image base; `image_size`
+2. `header_size` from 32 to 1024 and a multiple of 4, then `header_crc` over bytes 8 to
+   `header_size` − 1.
+3. `header_version` ≥ 1; `load_address` equals this slot's image base; `image_size`
    non-zero, a multiple of 4, and ≤ `0x8C00`.
 4. `image_crc` over the image.
 5. Vector-table sanity checks above.
@@ -421,12 +422,11 @@ booted successfully, is pending its first boot, or has been marked bad is record
 in the journal. Rejected: clearing `magic` to `0x00000000` to mark an image bad — it
 works without an erase, but gives two places that can disagree.
 
-**Open item.**
-
-1. **Future header versions vs. a bootloader that cannot be updated (D6).** A header
-   version 2 with more fields will be read by today's bootloader. Options: accept only
-   `header_version` 1 and `header_size` 32 (strict — any format change needs a new
-   bootloader, which the field can never get), or accept any `header_size` from 32 to
-   1024 that is a multiple of 4, verify the CRC over all of it, and read only the
-   version 1 fields (forward-compatible, as long as version 2 only appends).
-   *Undecided.*
+**Forward compatibility: later header versions may only append.** The bootloader can
+never be updated (D6), so today's bootloader must be able to boot images packaged
+with a future header version. It accepts any `header_size` from 32 to 1024 (one header
+page) that is a multiple of 4, verifies `header_crc` over the whole header, and reads
+only the version 1 fields. The rule this puts on every future version: **fields at
+offsets 0–31 never move or change meaning**, and new fields go after offset 32.
+Rejected — accept only version 1 with `header_size` 32: any format change would need a
+new bootloader, which devices in the field can never receive.

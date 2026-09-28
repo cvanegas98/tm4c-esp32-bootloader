@@ -14,6 +14,10 @@ Listings/
 *.o
 *.d
 
+# ---- Host-side test build output (gcc, e.g. crc32 host tests) ----
+*.exe
+*.out
+
 # ---- Keil user-specific state (machine/user dependent, not project config) ----
 *.uvguix.*
 *.uvoptx
