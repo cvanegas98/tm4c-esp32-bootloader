@@ -566,22 +566,34 @@ decides which page is authoritative.
 **Compaction**, triggered when the current page has no room for the next append:
 
 1. Read the latest valid record of each of the 3 types from the current (full) page.
-2. Make sure the other page is erased (a prior compaction may have been interrupted
-   before erasing it).
+2. Blank-check the other page (all 256 words `0xFFFFFFFF`) and erase it only if the
+   check fails. It is normally already erased, but a power cut between step 4 and
+   step 5 of an earlier compaction leaves it holding a lower `page_gen` and stale
+   records, so compaction never assumes it is blank.
 3. Write the 3 records to the other page, **byte-identical, including
    `boot_counter`.** Resetting the counter on compaction would silently grant a
    flaky image extra retry attempts, breaking the 3-attempt guarantee above.
 4. Write the new page's `page_gen` **last** — the single-word atomic handoff. A
    crash before this write leaves the old (full) page still authoritative; the whole
    procedure just replays from step 1 on the next boot.
-5. Erase the old page. **Eager**, immediately after the handoff — keeps the
-   invariant "the non-current page is always erased" true at all times, at the cost
-   of one erase (8–500 ms, D6) on the rare boot where compaction happens.
+5. Erase the old page. **Eager**, immediately after the handoff, so the non-current
+   page is normally already blank when the next compaction needs it and step 2 skips
+   its erase. This is the normal case, not an invariant: a power cut between step 4
+   and this erase leaves a stale non-current page. That is harmless — its `page_gen`
+   is lower, so it is never selected — and step 2 of the next compaction cleans it up.
+
+**Watchdog.** Steps 2 and 5 can each erase a page (up to 500 ms, D6), about 1 s
+together — the whole watchdog budget. D6 requires a feed between multi-page erases;
+the journal module knows nothing about the watchdog, so the feed point between the
+two erases is marked in `journal_compact` and wired in during Phase 2.
 
 **Rejected — lazy erase of the old page.** Defer the erase until the page is next
-needed as a compaction target. Saves the erase from the compaction's critical path,
-but a crash-recovery scan can no longer assume the standby page is blank, which adds
-a state the recovery logic has to distinguish for no benefit this project needs.
+needed as a compaction target. The erase count is the same either way, but lazy
+leaves a page with a valid, lower `page_gen` and stale records sitting in flash for
+the whole life of the current page instead of only during the power-cut window
+above. If the current page's `page_gen` word were ever lost, the selector would fall
+back to that stale page and resurrect old state; eager keeps that exposure as short
+as possible.
 
 **Proactive headroom check: the bootloader guarantees room before every jump.**
 Compaction is bootloader-only (D6) — the app's own flash writes never compact, they
