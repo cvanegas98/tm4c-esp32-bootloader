@@ -234,6 +234,41 @@ int main(void) {
         return 1;
     }
 
+    static const struct {
+        uint32_t counter;
+        uint32_t used;
+    } attempt_cases[] = {
+        { 0xFFFFFFFFu, 0u },
+        { 0xFFFFFFFEu, 1u },
+        { 0xFFFFFFFCu, 2u },
+        { 0xFFFFFFF8u, 3u },
+        // boot_counter sits outside the CRC; a stray cleared high bit must
+        // count as a used attempt, never be ignored.
+        { 0x7FFFFFFEu, 2u },
+        { 0x00000000u, 32u },
+    };
+
+    for (size_t i = 0; i < sizeof attempt_cases / sizeof attempt_cases[0]; i++) {
+        journal_record_t counted = { .boot_counter = attempt_cases[i].counter };
+        if (journal_attempts_used(&counted) != attempt_cases[i].used) {
+            fprintf(stderr, "Attempts used for 0x%08lX: got %lu, expected %lu\n",
+                    (unsigned long)attempt_cases[i].counter,
+                    (unsigned long)journal_attempts_used(&counted),
+                    (unsigned long)attempt_cases[i].used);
+            return 1;
+        }
+    }
+
+    // The consume step clears the lowest set bit; three consumes reach 0xFFFFFFF8.
+    uint32_t counter = 0xFFFFFFFFu;
+    for (int i = 0; i < 3; i++) {
+        counter &= counter - 1u;
+    }
+    if (counter != 0xFFFFFFF8u) {
+        fputs("Lowest-set-bit clearing did not reach 0xFFFFFFF8\n", stderr);
+        return 1;
+    }
+
     puts("Journal tests passed");
     return 0;
 }

@@ -308,3 +308,44 @@ uint32_t journal_ensure_room(void) {
 
     return journal_compact();
 }
+
+uint32_t journal_attempts_used(const journal_record_t *record) {
+    uint32_t counter = record->boot_counter;
+    uint32_t used = 0u;
+
+    for (uint32_t bit = 0u; bit < 32u; bit++) {
+        if ((counter & 1u) == 0u) {
+            used++;
+        }
+        counter >>= 1;
+    }
+
+    return used;
+}
+
+uint32_t journal_consume_attempt(uint32_t type) {
+    if (type != JOURNAL_TYPE_STATUS_A &&
+        type != JOURNAL_TYPE_STATUS_B) {
+        return JOURNAL_ERR_NO_RECORD;
+    }
+
+    const journal_record_t *active;
+    const journal_record_t *status_a;
+    const journal_record_t *status_b;
+    const void *next_free;
+
+    journal_page_select_t selected = journal_read(&active, &status_a, &status_b, &next_free);
+
+    if (selected == JOURNAL_PAGE_SELECT_NONE || selected == JOURNAL_PAGE_SELECT_AMBIGUOUS) {
+        return JOURNAL_ERR_NO_PAGE;
+    }
+
+    const journal_record_t *record = type == JOURNAL_TYPE_STATUS_A ? status_a : status_b;
+    if (record == NULL) {
+        return JOURNAL_ERR_NO_RECORD;
+    }
+
+    uint32_t address = (uint32_t)(uintptr_t)&record->boot_counter;
+    uint32_t counter = record->boot_counter;
+    return flash_write_word(address, counter & (counter - 1u));
+}

@@ -12,7 +12,7 @@
 // 1: full page, stale target
 // 2: page already has room
 // 3: full page, partially cleared boot counter
-#define BENCH_SCENARIO 3
+#define BENCH_SCENARIO 1
 
 #if BENCH_SCENARIO < 0 || BENCH_SCENARIO > 3
 #error "BENCH_SCENARIO must be 0, 1, 2, or 3"

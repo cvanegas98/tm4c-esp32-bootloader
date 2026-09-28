@@ -29,6 +29,7 @@
 #define JOURNAL_ERR_NO_ROOM 0x10000000u
 #define JOURNAL_ERR_NO_PAGE 0x08000000u
 #define JOURNAL_ERR_CLEANUP (1u << 26)
+#define JOURNAL_ERR_NO_RECORD 0x02000000u
 
 typedef struct {
     uint32_t seq;
@@ -71,5 +72,8 @@ uint32_t journal_append(uint32_t type, uint32_t value, uint32_t image_crc);
 
 uint32_t journal_compact(void);
 uint32_t journal_ensure_room(void);
+
+uint32_t journal_attempts_used(const journal_record_t *record);
+uint32_t journal_consume_attempt(uint32_t type);
 
 #endif // JOURNAL_H
