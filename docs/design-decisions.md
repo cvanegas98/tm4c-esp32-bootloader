@@ -327,6 +327,18 @@ Phase 2 bootloader fault handler must be visible or recorded, then reset.
   | Upload (`-u`) | CPU released; image runs from reset | 3 of 3 |
   | Program (`-v file`) | CPU stays held; LEDs dark until the next command or power-cycle | 2 of 3 |
   | Program onto a previously blank device | Image ran and hit HardFault (below) | 1 of 3 |
+  | Erase only (`-e RANGE`, no file) | CPU released; image runs from reset | 1 of 1, confirmed by readback |
+
+- *(Added 2026-09-28, journal compaction bench.)* A flash sequence that ended with an
+  erase-only command let the bench run immediately, compact the journal, and light
+  green unseen; the power-cycle rerun then failed its precondition (magenta) because
+  its starting state was already consumed. **End every flash sequence with a program
+  command**: do erase-only steps first, then the program steps, then power-cycle.
+  Programming a file without `-e` erases only the pages the file covers, so the
+  firmware image and the journal pages can be programmed in any order. A readback is
+  an upload, which also releases the CPU — take it after the power-cycle run, never
+  before: `-u 0x8000-0x87FF,readback.bin` (inclusive range; `-u` cannot be combined
+  with `-v`).
 
 - Do not rely on either behavior. A test image that modifies flash may run after any LM
   Flash command, and a before/after upload only describes what ran since the previous
