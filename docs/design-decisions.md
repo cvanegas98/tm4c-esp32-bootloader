@@ -430,3 +430,133 @@ only the version 1 fields. The rule this puts on every future version: **fields 
 offsets 0–31 never move or change meaning**, and new fields go after offset 32.
 Rejected — accept only version 1 with `header_size` 32: any format change would need a
 new bootloader, which devices in the field can never receive.
+
+---
+
+## D8 — Metadata journal record format and compaction
+
+**Decision.** One fixed 24-byte record layout is shared by three record kinds, all
+appended into the D3 journal: `ACTIVE_SLOT` (which slot the bootloader should try)
+and `STATUS_A` / `STATUS_B` (per-slot health). All fields are 32-bit words,
+little-endian.
+
+| Offset | Field | Contents |
+|---|---|---|
+| 0 | `seq` | Monotonic counter, shared across all three record kinds |
+| 4 | `type` | `0 = ACTIVE_SLOT`, `1 = STATUS_A`, `2 = STATUS_B` |
+| 8 | `value` | `ACTIVE_SLOT`: which slot (0=A, 1=B). `STATUS_*`: status enum |
+| 12 | `image_crc` | `STATUS_*` only — the D7 `image_crc` of the image this record describes. Reserved for `ACTIVE_SLOT` |
+| 16 | `record_crc` | CRC-32 (D5) of bytes 0–15 |
+| 20 | `boot_counter` | **Outside `record_crc`.** `STATUS_*` only; unused for `ACTIVE_SLOT` |
+
+24 bytes/record, ~42 records per 1 KB page (D3) before a compaction swap.
+
+**Why one shared layout instead of three record shapes.** Keeps the scanner and the
+compaction routine a single code path instead of three parsers. Costs a few unused
+bytes in the `ACTIVE_SLOT` record.
+
+**Why active-slot is its own record, not derived from the two statuses.** An
+explicit pointer means rollback is "append one small record" — it never touches
+either slot's `STATUS` record. Deriving "active" from, say, "highest `fw_version`
+among `GOOD` slots" would mean a rollback decision could be silently re-derived
+differently after a future compaction, and switching away from a failed slot would
+require rewriting (or preserving) its diagnostic state for no reason.
+
+**Why `STATUS` binds to `image_crc`.** Without it, a `STATUS_A = GOOD` record does
+not say which image it validated. Concrete failure: slot A is `GOOD`, someone
+reflashes it with a new image, and the journal write that should reset status to
+`PENDING` is interrupted by power loss between the image write and the journal
+append. The bootloader would see `STATUS_A = GOOD` and boot an unconfirmed image
+without ever running rollback logic. Binding the record to `image_crc` lets the
+bootloader detect the mismatch against the D7 header and treat it as `PENDING`.
+
+**Boot counter: 3 attempts, threshold fixed in bootloader code.** Not stored in the
+journal — matches D6 (the bootloader can never be updated, so nothing is gained by
+making the threshold field-tunable). `boot_counter` starts at `0xFFFFFFFF`. On every
+boot where the active slot's status is `PENDING`, the bootloader clears one more bit
+before jumping. Once 3 bits are clear with no `GOOD` confirmation, the bootloader
+appends `STATUS = BAD` and flips `ACTIVE_SLOT`. Once status reaches `GOOD` the
+counter is never touched again. `boot_counter` sits outside `record_crc` specifically
+so clearing a bit never invalidates the record it belongs to.
+
+This makes D6 open item 1 (the app's own boot-OK flash write under MEM#14) a hard
+requirement: the app must be able to append its `STATUS = GOOD` record before a
+third unconfirmed reboot happens, or a healthy image gets rolled back anyway.
+
+**Page identification: a generation word.** Refines D3's "the reader takes the
+highest-sequence valid record" for the two-page case. Each 1 KB page's first word is
+`page_gen` (u32); erased (`0xFFFFFFFF`) means "not active." The current page is
+whichever of the two has a valid `page_gen` and the higher value. Comparing `seq`
+*across* pages during a compaction is not safe — the old (full) page can hold
+higher-numbered records than a freshly-populated new page — so `page_gen`, not `seq`,
+decides which page is authoritative.
+
+**Compaction**, triggered when the current page has no room for the next append:
+
+1. Read the latest valid record of each of the 3 types from the current (full) page.
+2. Make sure the other page is erased (a prior compaction may have been interrupted
+   before erasing it).
+3. Write the 3 records to the other page, **byte-identical, including
+   `boot_counter`.** Resetting the counter on compaction would silently grant a
+   flaky image extra retry attempts, breaking the 3-attempt guarantee above.
+4. Write the new page's `page_gen` **last** — the single-word atomic handoff. A
+   crash before this write leaves the old (full) page still authoritative; the whole
+   procedure just replays from step 1 on the next boot.
+5. Erase the old page. **Eager**, immediately after the handoff — keeps the
+   invariant "the non-current page is always erased" true at all times, at the cost
+   of one erase (8–500 ms, D6) on the rare boot where compaction happens.
+
+**Rejected — lazy erase of the old page.** Defer the erase until the page is next
+needed as a compaction target. Saves the erase from the compaction's critical path,
+but a crash-recovery scan can no longer assume the standby page is blank, which adds
+a state the recovery logic has to distinguish for no benefit this project needs.
+
+**Normal-boot scan (no compaction).** Find the current page via `page_gen`, then walk
+its records front-to-back, latching the highest-`seq` CRC-valid record per type. Stop
+at the first blank (`0xFFFFFFFF`) slot — appends are strictly sequential within a
+page, so nothing after the first blank slot can be valid.
+
+**Parked — first-boot / manufacturing provisioning.** A blank chip has both pages at
+`page_gen = 0xFFFFFFFF`; nothing exists yet for the normal scan to find. Something
+must write the bootstrap records (`page_gen = 1`, an initial `ACTIVE_SLOT`, and
+initial `STATUS_A`/`STATUS_B`) before normal boot logic applies. Revisit once the
+bootloader's boot/validate/jump logic exists, since provisioning is really "what the
+bootloader does when the journal is empty," a case that logic has to handle anyway.
+
+---
+
+## D9 — SRAM no-init boot-progress marker
+
+**Decision.** A single `u32` word, `boot_marker`, at a fixed address at the
+**bottom** of SRAM (`0x20000000`), excluded from both the bootloader's and the app's
+zero-init (`.bss`)/copy-init (`.data`) startup so its value survives any reset that
+does not remove power. No CRC — the sentinel value is self-validating, the same
+reasoning as `magic` in D7.
+
+**Mechanism.**
+
+- On every bootloader entry (any reset), read `boot_marker` first, then immediately
+  clear it to a neutral value before doing anything else.
+- If the value just read was the sentinel, the previous reset happened **during app
+  execution** — the bootloader had already reached the jump last time.
+- Any other value (garbage, `0xFFFFFFFF`, leftover from a brown-out) means the
+  reset's origin is unknown or possibly cold; treat it conservatively.
+- Right before jumping to the app, write the sentinel back.
+
+**Why this exists.** Errata SYSCTL#21: `RESC` may not reliably log the reset cause,
+so the hardware cannot be trusted to say why a reset happened. This is an
+independent, software-controlled signal instead.
+
+**Why the bottom of SRAM, not the top.** The top of SRAM is where the stack lives —
+the initial SP is typically at or near `0x20008000`, and D7's vector-table check
+already validates `SP ≤ 0x20008000` (hardware-verified, D6 bench tests). Reserving a
+word at the top would lower that ceiling to `0x20007FFC` for both builds and require
+revisiting already-verified logic. Reserving a word at the bottom only requires each
+build's linker to start `.data`/`.bss` placement 4 bytes higher — no existing
+validated logic changes.
+
+**Scope kept minimal.** Boot-progress marker only — no crash diagnostics and no
+app-to-bootloader request channel. Both were considered and set aside; revisit only
+if a concrete need for either surfaces.
+
+**Open.** The sentinel value itself is not yet chosen.
