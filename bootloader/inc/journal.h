@@ -22,6 +22,9 @@
 #define JOURNAL_SLOT_B 1
 
 #define JOURNAL_PAGE_GEN_ERASED 0xFFFFFFFFu
+#define JOURNAL_PAGE_0_BASE 0x08000u
+#define JOURNAL_PAGE_1_BASE 0x08400u
+#define JOURNAL_PAGE_SIZE   1024u
 
 typedef struct {
     uint32_t seq;
@@ -49,5 +52,9 @@ uint32_t journal_page_gen(const void *page);
 journal_page_select_t journal_select_current_page(uint32_t gen_0, uint32_t gen_1);
 
 void journal_scan_page(const void *page, size_t page_size, const journal_record_t **active_slot, const journal_record_t **status_a, const journal_record_t **status_b);
+
+journal_page_select_t journal_read(const journal_record_t **active_slot,
+                                   const journal_record_t **status_a,
+                                   const journal_record_t **status_b);
 
 #endif // JOURNAL_H

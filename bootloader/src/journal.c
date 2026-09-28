@@ -79,3 +79,35 @@ void journal_scan_page(const void *page, size_t page_size,
         }
     }
 }
+
+journal_page_select_t journal_read(const journal_record_t **active_slot,
+                                   const journal_record_t **status_a,
+                                   const journal_record_t **status_b) {
+    *active_slot = NULL;
+    *status_a = NULL;
+    *status_b = NULL;
+
+    const void *page_0 = (const void *)(uintptr_t)JOURNAL_PAGE_0_BASE;
+    const void *page_1 = (const void *)(uintptr_t)JOURNAL_PAGE_1_BASE;
+
+    uint32_t gen_0 = journal_page_gen(page_0);
+    uint32_t gen_1 = journal_page_gen(page_1);
+    journal_page_select_t selected =
+        journal_select_current_page(gen_0, gen_1);
+
+    switch (selected) {
+    case JOURNAL_PAGE_SELECT_0:
+        journal_scan_page(page_0, JOURNAL_PAGE_SIZE,
+                          active_slot, status_a, status_b);
+        break;
+    case JOURNAL_PAGE_SELECT_1:
+        journal_scan_page(page_1, JOURNAL_PAGE_SIZE,
+                          active_slot, status_a, status_b);
+        break;
+    case JOURNAL_PAGE_SELECT_NONE:
+    case JOURNAL_PAGE_SELECT_AMBIGUOUS:
+        break;
+    }
+
+    return selected;
+}
