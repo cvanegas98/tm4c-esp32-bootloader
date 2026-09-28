@@ -17,6 +17,7 @@ Listings/
 # ---- Host-side test build output (gcc, e.g. crc32 host tests) ----
 *.exe
 *.out
+__pycache__/
 
 # ---- Keil user-specific state (machine/user dependent, not project config) ----
 *.uvguix.*

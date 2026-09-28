@@ -26,6 +26,9 @@
 #define JOURNAL_PAGE_1_BASE 0x08400u
 #define JOURNAL_PAGE_SIZE   1024u
 
+#define JOURNAL_ERR_NO_ROOM 0x10000000u
+#define JOURNAL_ERR_NO_PAGE 0x08000000u
+
 typedef struct {
     uint32_t seq;
     uint32_t type;
@@ -51,10 +54,18 @@ bool journal_record_is_valid(const journal_record_t *record);
 uint32_t journal_page_gen(const void *page);
 journal_page_select_t journal_select_current_page(uint32_t gen_0, uint32_t gen_1);
 
-void journal_scan_page(const void *page, size_t page_size, const journal_record_t **active_slot, const journal_record_t **status_a, const journal_record_t **status_b);
+void journal_scan_page(const void *page, size_t page_size,
+                       const journal_record_t **active_slot,
+                       const journal_record_t **status_a,
+                       const journal_record_t **status_b,
+                       const void **next_free);
 
 journal_page_select_t journal_read(const journal_record_t **active_slot,
                                    const journal_record_t **status_a,
-                                   const journal_record_t **status_b);
+                                   const journal_record_t **status_b,
+                                   const void **next_free);
+
+uint32_t journal_write_record(uint32_t address, const journal_record_t *record);
+uint32_t journal_append(uint32_t type, uint32_t value, uint32_t image_crc);
 
 #endif // JOURNAL_H

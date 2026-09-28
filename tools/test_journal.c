@@ -5,6 +5,13 @@
 #include "journal.h"
 
 #include <stdio.h>
+#include "flash.h"
+
+uint32_t flash_write_word(uint32_t address, uint32_t value) {
+    (void)address;
+    (void)value;
+    return FLASH_ERR_INVALID_ADDRESS;
+}
 
 int main(void) {
     journal_record_t record = {
@@ -143,13 +150,15 @@ int main(void) {
     const journal_record_t *active;
     const journal_record_t *status_a;
     const journal_record_t *status_b;
+    const void *next_free;
 
-    journal_scan_page(&page, sizeof page, &active, &status_a, &status_b);
+    journal_scan_page(&page, sizeof page, &active, &status_a, &status_b, &next_free);
     if (active != &page.records[3] ||
         status_a != &page.records[1] ||
-        status_b != &page.records[2]) {
-        fputs("Page scan failed to select latest records or stop at torn record\n",
-              stderr);
+        status_b != &page.records[2] ||
+        next_free != &page.records[4]) {
+        fputs("Page scan failed to select latest records, stop at torn record, "
+              "or report the free slot\n", stderr);
         return 1;
     }
 
@@ -161,17 +170,62 @@ int main(void) {
         return 1;
     }
 
-    journal_scan_page(&page, sizeof page, &active, &status_a, &status_b);
+    journal_scan_page(&page, sizeof page, &active, &status_a, &status_b, &next_free);
     if (active != &page.records[3] ||
         status_a != &page.records[1] ||
-        status_b != &page.records[2]) {
+        status_b != &page.records[2] ||
+        next_free != &page.records[4]) {
         fputs("Page scan continued past an unknown record type\n", stderr);
         return 1;
     }
 
-    journal_scan_page(&page, sizeof(uint32_t), &active, &status_a, &status_b);
-    if (active != NULL || status_a != NULL || status_b != NULL) {
-        fputs("Header-only page scan found records\n", stderr);
+    journal_scan_page(&page, sizeof(uint32_t), &active, &status_a, &status_b, &next_free);
+    if (active != NULL || status_a != NULL || status_b != NULL ||
+        next_free != (const uint8_t *)&page + sizeof(uint32_t)) {
+        fputs("Header-only page scan found records or misplaced next_free\n",
+              stderr);
+        return 1;
+    }
+
+    // A page_size smaller than the page_gen word itself is degenerate;
+    // next_free has nothing sensible to report and stays NULL.
+    journal_scan_page(&page, sizeof(uint32_t) - 1, &active, &status_a, &status_b,
+                      &next_free);
+    if (active != NULL || status_a != NULL || status_b != NULL || next_free != NULL) {
+        fputs("Undersized page scan found records or a non-NULL next_free\n",
+              stderr);
+        return 1;
+    }
+
+    struct {
+        uint32_t page_gen;
+        journal_record_t records[2];
+    } full_page = { .page_gen = 7 };
+
+    full_page.records[0] = (journal_record_t){
+        .seq = 1, .type = JOURNAL_TYPE_ACTIVE_SLOT,
+        .value = JOURNAL_SLOT_A, .boot_counter = 0xFFFFFFFF
+    };
+    full_page.records[1] = (journal_record_t){
+        .seq = 2, .type = JOURNAL_TYPE_STATUS_A,
+        .value = JOURNAL_STATUS_PENDING, .boot_counter = 0xFFFFFFFF
+    };
+    full_page.records[0].record_crc = journal_record_crc(&full_page.records[0]);
+    full_page.records[1].record_crc = journal_record_crc(&full_page.records[1]);
+
+    const journal_record_t *full_active;
+    const journal_record_t *full_status_a;
+    const journal_record_t *full_status_b;
+    const void *full_next_free;
+
+    journal_scan_page(&full_page, sizeof full_page,
+                      &full_active, &full_status_a, &full_status_b,
+                      &full_next_free);
+    if (full_active != &full_page.records[0] ||
+        full_status_a != &full_page.records[1] ||
+        full_next_free != (const uint8_t *)&full_page + sizeof full_page) {
+        fputs("Fully-packed page scan did not report next_free past the end\n",
+              stderr);
         return 1;
     }
 
