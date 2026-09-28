@@ -1,11 +1,12 @@
 // Christian Vanegas
 // Date: 2026-09-28
-// Description: Declares the metadata journal record format and CRC checks.
+// Description: Declares the metadata journal record and page interfaces.
 
 #ifndef JOURNAL_H
 #define JOURNAL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define JOURNAL_TYPE_ACTIVE_SLOT 0
@@ -20,6 +21,8 @@
 #define JOURNAL_SLOT_A 0
 #define JOURNAL_SLOT_B 1
 
+#define JOURNAL_PAGE_GEN_ERASED 0xFFFFFFFFu
+
 typedef struct {
     uint32_t seq;
     uint32_t type;
@@ -32,7 +35,19 @@ typedef struct {
 _Static_assert(sizeof(journal_record_t) == 24,
                "journal record must be 24 bytes");
 
+typedef enum {
+    JOURNAL_PAGE_SELECT_NONE,
+    JOURNAL_PAGE_SELECT_0,
+    JOURNAL_PAGE_SELECT_1,
+    JOURNAL_PAGE_SELECT_AMBIGUOUS
+} journal_page_select_t;
+
 uint32_t journal_record_crc(const journal_record_t *record);
 bool journal_record_is_valid(const journal_record_t *record);
+
+uint32_t journal_page_gen(const void *page);
+journal_page_select_t journal_select_current_page(uint32_t gen_0, uint32_t gen_1);
+
+void journal_scan_page(const void *page, size_t page_size, const journal_record_t **active_slot, const journal_record_t **status_a, const journal_record_t **status_b);
 
 #endif // JOURNAL_H
